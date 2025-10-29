@@ -4,7 +4,56 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const nodemailer = require('nodemailer');
 const axios = require('axios');
-
+// Temporary import endpoint - DELETE AFTER FIRST USE
+app.get('/admin/import-catalog', async (req, res) => {
+  // Simple password protection
+  if (req.query.password !== 'winning2024') {
+    return res.status(403).send('Access denied');
+  }
+  
+  res.writeHead(200, {
+    'Content-Type': 'text/plain; charset=utf-8',
+    'Transfer-Encoding': 'chunked'
+  });
+  
+  res.write('🚀 CATALOG IMPORT STARTING...\n');
+  res.write('═══════════════════════════════════════\n\n');
+  
+  // Capture console output and send to browser
+  const originalLog = console.log;
+  const originalError = console.error;
+  
+  console.log = (...args) => {
+    const message = args.join(' ') + '\n';
+    res.write(message);
+    originalLog(...args);
+  };
+  
+  console.error = (...args) => {
+    const message = '❌ ' + args.join(' ') + '\n';
+    res.write(message);
+    originalError(...args);
+  };
+  
+  try {
+    // Import the function
+    const { importCatalog } = require('./import-catalog');
+    await importCatalog();
+    
+    res.write('\n\n✨ SUCCESS! Import completed.\n');
+    res.write('You can now close this window.\n');
+    res.end();
+    
+  } catch (error) {
+    res.write(`\n\n💥 ERROR: ${error.message}\n`);
+    res.write(error.stack);
+    res.end();
+  } finally {
+    // Restore console
+    console.log = originalLog;
+    console.error = originalError;
+  }
+});
 const app = express();
 const PORT = process.env.PORT || 3000;
 
