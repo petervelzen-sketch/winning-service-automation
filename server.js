@@ -116,6 +116,7 @@ app.get('/', (req, res) => {
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
+
 // ============================================
 // SIMPLE REPLY FORM
 // ============================================
@@ -128,19 +129,19 @@ app.get('/reply-form', (req, res) => {
   <style>
     body { font-family: Arial, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }
     h1 { color: #333; }
-    textarea { width: 100%; height: 300px; padding: 10px; font-family: monospace; font-size: 14px; }
+    textarea { width: 100%; height: 300px; padding: 10px; font-family: monospace; font-size: 14px; border: 1px solid #ccc; border-radius: 5px; }
     button { background: #4CAF50; color: white; padding: 15px 30px; border: none; border-radius: 5px; font-size: 16px; cursor: pointer; margin-top: 10px; }
     button:hover { background: #45a049; }
-    .result { margin-top: 20px; padding: 15px; background: #f0f0f0; border-radius: 5px; display: none; }
-    .success { background: #d4edda; color: #155724; }
-    .error { background: #f8d7da; color: #721c24; }
+    .result { margin-top: 20px; padding: 15px; border-radius: 5px; display: none; }
+    .success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+    .error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
   </style>
 </head>
 <body>
   <h1>📧 Process Customer Reply</h1>
-  <p>Paste the customer's email below and click Process:</p>
+  <p><strong>Instructions:</strong> When a customer replies to your email, copy the entire email content and paste it below.</p>
   
-  <textarea id="emailContent" placeholder="Paste customer email here..."></textarea>
+  <textarea id="emailContent" placeholder="Paste the customer's full email reply here (including From: line if possible)..."></textarea>
   
   <button onclick="processReply()">Process Reply</button>
   
@@ -173,16 +174,17 @@ app.get('/reply-form', (req, res) => {
         
         if (data.success) {
           result.className = 'result success';
-          result.innerHTML = '✅ Success! Service options emailed to you.<br><br>' + 
-                            'Request: ' + data.siNumber + '<br>' +
-                            'Options found: ' + data.optionsCount;
+          result.innerHTML = '✅ <strong>Success!</strong> Service options have been emailed to you.<br><br>' + 
+                            '<strong>Request:</strong> ' + data.siNumber + '<br>' +
+                            '<strong>Customer:</strong> ' + data.customerEmail + '<br>' +
+                            '<strong>Service options found:</strong> ' + data.optionsCount;
         } else {
           result.className = 'result error';
-          result.innerHTML = '❌ Error: ' + (data.error || 'Unknown error');
+          result.innerHTML = '❌ <strong>Error:</strong> ' + (data.error || 'Unknown error');
         }
       } catch (error) {
         result.className = 'result error';
-        result.innerHTML = '❌ Error: ' + error.message;
+        result.innerHTML = '❌ <strong>Error:</strong> ' + error.message;
       }
     }
   </script>
@@ -193,35 +195,53 @@ app.get('/reply-form', (req, res) => {
 });
 
 app.post('/api/process-email-content', async (req, res) => {
+  console.log('📧 Processing manual email reply');
+  
   try {
     const { emailContent } = req.body;
     
-    // Extract customer email from "From:" line
+    if (!emailContent) {
+      return res.status(400).json({ error: 'No email content provided' });
+    }
+    
+    // Extract customer email from "From:" line or look for email patterns
     const fromMatch = emailContent.match(/From:.*?([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
-    const customerEmail = fromMatch ? fromMatch[1] : null;
+    let customerEmail = fromMatch ? fromMatch[1] : null;
+    
+    // Fallback: find any email in the content
+    if (!customerEmail) {
+      const emailMatch = emailContent.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+      customerEmail = emailMatch ? emailMatch[1] : null;
+    }
     
     if (!customerEmail) {
-      return res.status(400).json({ error: 'Could not find customer email address' });
+      return res.status(400).json({ error: 'Could not find customer email address in the content' });
     }
     
     // Extract serial number
     const serialMatch = emailContent.match(/serial\s*(?:number)?[\s:]*([A-Z0-9\-]+)/i);
-    const serialNumber = serialMatch ? serialMatch[1] : '';
+    const serialNumber = serialMatch ? serialMatch[1] : 'Not provided';
     
     // Extract warranty status
     const warrantyYes = /warranty[\s:]*yes/i.test(emailContent);
     const warrantyNo = /warranty[\s:]*no/i.test(emailContent);
     const warrantyStatus = warrantyYes ? 'In Warranty' : (warrantyNo ? 'Out of Warranty' : 'Unknown');
     
-    // Extract problem description (look for common patterns)
+    // Extract problem description
     let problemDescription = '';
-    const problemMatch = emailContent.match(/problem[\s:]*(.+?)(?:\n\n|\nserial|$)/is);
+    const problemMatch = emailContent.match(/(?:problem|issue|description)[\s:]*(.+?)(?:\n\n|\nserial|\nwarranty|$)/is);
     if (problemMatch) {
       problemDescription = problemMatch[1].trim();
     } else {
-      // Fallback: use content after "Hi" greeting
-      const contentMatch = emailContent.match(/Hi.*?\n\n(.+?)(?:\nserial|$)/is);
-      if (contentMatch) problemDescription = contentMatch[1].trim();
+      // Fallback: try to get main content
+      const lines = emailContent.split('\n').filter(l => l.trim() && !l.match(/^(from|to|subject|date):/i));
+      if (lines.length > 0) {
+        problemDescription = lines.slice(0, 3).join(' ').trim();
+      }
+    }
+    
+    if (!problemDescription) {
+      problemDescription = 'See customer email for details';
     }
     
     // Find the service request
@@ -231,7 +251,9 @@ app.post('/api/process-email-content', async (req, res) => {
     );
     
     if (requests.length === 0) {
-      return res.status(404).json({ error: 'No pending service request found for ' + customerEmail });
+      return res.status(404).json({ 
+        error: `No pending service request found for ${customerEmail}. Make sure a request was created first.` 
+      });
     }
     
     const request = requests[0];
@@ -242,8 +264,12 @@ app.post('/api/process-email-content', async (req, res) => {
       [request.id, serialNumber, problemDescription, warrantyStatus]
     );
     
+    console.log(`✅ Saved customer response for ${request.si_number}`);
+    
     // Get service options
     const serviceOptions = await getServiceOptionsFromSheet(request.sku, warrantyStatus);
+    
+    console.log(`📋 Found ${serviceOptions.length} service options`);
     
     // Send email with options
     await sendServiceOptionsEmail({
@@ -260,11 +286,12 @@ app.post('/api/process-email-content', async (req, res) => {
     res.json({
       success: true,
       siNumber: request.si_number,
+      customerEmail: customerEmail,
       optionsCount: serviceOptions.length
     });
     
   } catch (error) {
-    console.error('Error:', error);
+    console.error('❌ Error processing email:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -337,60 +364,6 @@ app.post('/api/service-request', async (req, res) => {
 });
 
 // ============================================
-// ENDPOINT 2: CUSTOMER REPLY
-// ============================================
-app.post('/api/customer-reply', async (req, res) => {
-  console.log('📧 Processing customer reply');
-
-  try {
-    const { customerEmail, serialNumber, problemDescription, warrantyStatus } = req.body;
-
-    const [requests] = await pool.query(
-      'SELECT * FROM service_requests WHERE customer_email = ? AND status = ? LIMIT 1',
-      [customerEmail, 'waiting_customer']
-    );
-
-    if (requests.length === 0) {
-      return res.status(404).json({ error: 'No pending service request found' });
-    }
-
-    const request = requests[0];
-
-    await pool.query(
-      `INSERT INTO customer_responses 
-       (service_request_id, serial_number, problem_description, warranty_status)
-       VALUES (?, ?, ?, ?)`,
-      [request.id, serialNumber, problemDescription, warrantyStatus]
-    );
-
-    const serviceOptions = await getServiceOptionsFromSheet(request.sku, warrantyStatus);
-
-    await sendServiceOptionsEmail({
-      request,
-      serialNumber,
-      problemDescription,
-      warrantyStatus,
-      serviceOptions
-    });
-
-    await pool.query(
-      'UPDATE service_requests SET status = ? WHERE id = ?',
-      ['options_sent', request.id]
-    );
-
-    res.json({
-      success: true,
-      message: 'Reply processed',
-      optionsFound: serviceOptions.length
-    });
-
-  } catch (error) {
-    console.error('❌ Error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ============================================
 // HELPER FUNCTIONS
 // ============================================
 
@@ -432,31 +405,69 @@ async function getServiceOptionsFromSheet(sku, warrantyStatus) {
     const lines = response.data.split('\n');
     if (lines.length === 0) return [];
 
-    // Parse header row
-    const headers = lines[0].split(',').map(h => h.replace(/^"|"$/g, '').trim());
+    // Parse header row (remove quotes)
+    const headerLine = lines[0];
+    const headers = [];
+    let current = '';
+    let inQuotes = false;
+    
+    for (let i = 0; i < headerLine.length; i++) {
+      const char = headerLine[i];
+      if (char === '"') {
+        inQuotes = !inQuotes;
+      } else if (char === ',' && !inQuotes) {
+        headers.push(current.trim());
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+    headers.push(current.trim());
     
     const manufacturer = identifyManufacturer(sku);
     const productType = identifyProductType(sku);
 
-    const matches = lines.slice(1)
-      .filter(line => line.trim())
-      .map(line => {
-        // Simple CSV parsing (handles quoted fields)
-        const values = line.match(/(".*?"|[^",]+)(?=\s*,|\s*$)/g) || [];
-        const row = values.map(v => v.replace(/^"|"$/g, '').trim());
-        
-        const obj = {};
-        headers.forEach((header, i) => {
-          obj[header] = row[i] || '';
-        });
-        return obj;
-      })
-      .filter(row => {
-        return row['Manufacturer'] === manufacturer &&
-               row['Product Type'] === productType &&
-               row['Warranty Status'] === warrantyStatus;
-      });
+    console.log(`Looking for: ${manufacturer} / ${productType} / ${warrantyStatus}`);
 
+    const matches = [];
+    
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      
+      // Parse CSV line with proper quote handling
+      const values = [];
+      let currentValue = '';
+      let insideQuotes = false;
+      
+      for (let j = 0; j < line.length; j++) {
+        const char = line[j];
+        if (char === '"') {
+          insideQuotes = !insideQuotes;
+        } else if (char === ',' && !insideQuotes) {
+          values.push(currentValue.trim());
+          currentValue = '';
+        } else {
+          currentValue += char;
+        }
+      }
+      values.push(currentValue.trim());
+      
+      // Create object
+      const row = {};
+      headers.forEach((header, index) => {
+        row[header] = values[index] || '';
+      });
+      
+      // Check if matches
+      if (row['Manufacturer'] === manufacturer &&
+          row['Product Type'] === productType &&
+          row['Warranty Status'] === warrantyStatus) {
+        matches.push(row);
+      }
+    }
+
+    console.log(`Found ${matches.length} matching options`);
     return matches;
 
   } catch (error) {
@@ -535,7 +546,7 @@ View invoice: ${data.url}
 
   try {
     await emailTransporter.sendMail({
-      from: process.env.SMTP_FROM || '"Winning Service" <service@winning.com.au>',
+      from: process.env.SMTP_FROM || process.env.SMTP_USER,
       to: data.assignedUserEmail,
       subject: `📋 Service Request Ready - ${data.customerData.name} - ${data.customerData.siNumber}`,
       text: emailBody
@@ -598,7 +609,7 @@ Copy and send to customer.
 
   try {
     await emailTransporter.sendMail({
-      from: process.env.SMTP_FROM || '"Winning Service" <service@winning.com.au>',
+      from: process.env.SMTP_FROM || process.env.SMTP_USER,
       to: request.assigned_user_email,
       subject: `⚡ Customer Replied - ${request.customer_name} - Service Options Ready`,
       text: emailBody
@@ -622,7 +633,7 @@ async function startServer() {
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`🚀 Server running on port ${PORT}`);
       console.log(`📍 Health check: http://localhost:${PORT}/health`);
-      console.log(`📍 API endpoint: http://localhost:${PORT}/api/service-request`);
+      console.log(`📍 Reply form: http://localhost:${PORT}/reply-form`);
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);
