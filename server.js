@@ -116,6 +116,158 @@ app.get('/', (req, res) => {
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
+// ============================================
+// SIMPLE REPLY FORM
+// ============================================
+app.get('/reply-form', (req, res) => {
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Process Customer Reply</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }
+    h1 { color: #333; }
+    textarea { width: 100%; height: 300px; padding: 10px; font-family: monospace; font-size: 14px; }
+    button { background: #4CAF50; color: white; padding: 15px 30px; border: none; border-radius: 5px; font-size: 16px; cursor: pointer; margin-top: 10px; }
+    button:hover { background: #45a049; }
+    .result { margin-top: 20px; padding: 15px; background: #f0f0f0; border-radius: 5px; display: none; }
+    .success { background: #d4edda; color: #155724; }
+    .error { background: #f8d7da; color: #721c24; }
+  </style>
+</head>
+<body>
+  <h1>📧 Process Customer Reply</h1>
+  <p>Paste the customer's email below and click Process:</p>
+  
+  <textarea id="emailContent" placeholder="Paste customer email here..."></textarea>
+  
+  <button onclick="processReply()">Process Reply</button>
+  
+  <div id="result" class="result"></div>
+  
+  <script>
+    async function processReply() {
+      const content = document.getElementById('emailContent').value;
+      const result = document.getElementById('result');
+      
+      if (!content.trim()) {
+        result.className = 'result error';
+        result.style.display = 'block';
+        result.innerHTML = '❌ Please paste email content';
+        return;
+      }
+      
+      result.innerHTML = '⏳ Processing...';
+      result.className = 'result';
+      result.style.display = 'block';
+      
+      try {
+        const response = await fetch('/api/process-email-content', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ emailContent: content })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+          result.className = 'result success';
+          result.innerHTML = '✅ Success! Service options emailed to you.<br><br>' + 
+                            'Request: ' + data.siNumber + '<br>' +
+                            'Options found: ' + data.optionsCount;
+        } else {
+          result.className = 'result error';
+          result.innerHTML = '❌ Error: ' + (data.error || 'Unknown error');
+        }
+      } catch (error) {
+        result.className = 'result error';
+        result.innerHTML = '❌ Error: ' + error.message;
+      }
+    }
+  </script>
+</body>
+</html>
+  `;
+  res.send(html);
+});
+
+app.post('/api/process-email-content', async (req, res) => {
+  try {
+    const { emailContent } = req.body;
+    
+    // Extract customer email from "From:" line
+    const fromMatch = emailContent.match(/From:.*?([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
+    const customerEmail = fromMatch ? fromMatch[1] : null;
+    
+    if (!customerEmail) {
+      return res.status(400).json({ error: 'Could not find customer email address' });
+    }
+    
+    // Extract serial number
+    const serialMatch = emailContent.match(/serial\s*(?:number)?[\s:]*([A-Z0-9\-]+)/i);
+    const serialNumber = serialMatch ? serialMatch[1] : '';
+    
+    // Extract warranty status
+    const warrantyYes = /warranty[\s:]*yes/i.test(emailContent);
+    const warrantyNo = /warranty[\s:]*no/i.test(emailContent);
+    const warrantyStatus = warrantyYes ? 'In Warranty' : (warrantyNo ? 'Out of Warranty' : 'Unknown');
+    
+    // Extract problem description (look for common patterns)
+    let problemDescription = '';
+    const problemMatch = emailContent.match(/problem[\s:]*(.+?)(?:\n\n|\nserial|$)/is);
+    if (problemMatch) {
+      problemDescription = problemMatch[1].trim();
+    } else {
+      // Fallback: use content after "Hi" greeting
+      const contentMatch = emailContent.match(/Hi.*?\n\n(.+?)(?:\nserial|$)/is);
+      if (contentMatch) problemDescription = contentMatch[1].trim();
+    }
+    
+    // Find the service request
+    const [requests] = await pool.query(
+      'SELECT * FROM service_requests WHERE customer_email = ? AND status = ? ORDER BY created_at DESC LIMIT 1',
+      [customerEmail, 'waiting_customer']
+    );
+    
+    if (requests.length === 0) {
+      return res.status(404).json({ error: 'No pending service request found for ' + customerEmail });
+    }
+    
+    const request = requests[0];
+    
+    // Save response
+    await pool.query(
+      'INSERT INTO customer_responses (service_request_id, serial_number, problem_description, warranty_status) VALUES (?, ?, ?, ?)',
+      [request.id, serialNumber, problemDescription, warrantyStatus]
+    );
+    
+    // Get service options
+    const serviceOptions = await getServiceOptionsFromSheet(request.sku, warrantyStatus);
+    
+    // Send email with options
+    await sendServiceOptionsEmail({
+      request,
+      serialNumber,
+      problemDescription,
+      warrantyStatus,
+      serviceOptions
+    });
+    
+    // Update status
+    await pool.query('UPDATE service_requests SET status = ? WHERE id = ?', ['options_sent', request.id]);
+    
+    res.json({
+      success: true,
+      siNumber: request.si_number,
+      optionsCount: serviceOptions.length
+    });
+    
+  } catch (error) {
+    console.error('Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // ============================================
 // ENDPOINT 1: CREATE SERVICE REQUEST
