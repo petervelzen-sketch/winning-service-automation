@@ -270,36 +270,39 @@ function extractCustomerData(pageText) {
 async function getServiceOptionsFromSheet(sku, warrantyStatus) {
   const SHEET_ID = '16BTtqfZYo0X5c2uPkWLaNC2dSpvkJulFjCk2z3Cms4U';
   const SHEET_NAME = 'Service Options';
-  const API_KEY = process.env.GOOGLE_SHEETS_API_KEY;
-
-  if (!API_KEY) {
-    console.warn('⚠️ No Google Sheets API key configured');
-    return [];
-  }
 
   try {
-    const url = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${SHEET_NAME}?key=${API_KEY}`;
+    // Use public CSV export (works for public sheets without API key)
+    const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(SHEET_NAME)}`;
     const response = await axios.get(url);
     
-    const rows = response.data.values;
-    if (!rows || rows.length === 0) return [];
+    // Parse CSV
+    const lines = response.data.split('\n');
+    if (lines.length === 0) return [];
 
-    const headers = rows[0];
+    // Parse header row
+    const headers = lines[0].split(',').map(h => h.replace(/^"|"$/g, '').trim());
+    
     const manufacturer = identifyManufacturer(sku);
     const productType = identifyProductType(sku);
 
-    const matches = rows.slice(1)
-      .filter(row => {
-        return row[0] === manufacturer &&
-               row[1] === productType &&
-               row[2] === warrantyStatus;
-      })
-      .map(row => {
+    const matches = lines.slice(1)
+      .filter(line => line.trim())
+      .map(line => {
+        // Simple CSV parsing (handles quoted fields)
+        const values = line.match(/(".*?"|[^",]+)(?=\s*,|\s*$)/g) || [];
+        const row = values.map(v => v.replace(/^"|"$/g, '').trim());
+        
         const obj = {};
         headers.forEach((header, i) => {
           obj[header] = row[i] || '';
         });
         return obj;
+      })
+      .filter(row => {
+        return row['Manufacturer'] === manufacturer &&
+               row['Product Type'] === productType &&
+               row['Warranty Status'] === warrantyStatus;
       });
 
     return matches;
